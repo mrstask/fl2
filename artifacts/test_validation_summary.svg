@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="560" viewBox="0 0 1000 560">
+  <rect width="1000" height="560" fill="#121417"/>
+  <rect x="30" y="30" width="940" height="500" fill="#171c23" stroke="#5a7290" stroke-width="2"/>
+  <text x="60" y="80" fill="#e7eef8" font-size="30" font-family="Arial">Test Validation Summary</text>
+  <text x="60" y="130" fill="#dbe4ee" font-size="23" font-family="Arial">Command: python -m unittest discover -s tests -p "test_*.py" -v</text>
+  <text x="60" y="166" fill="#dbe4ee" font-size="23" font-family="Arial"></text>
+  <text x="60" y="202" fill="#dbe4ee" font-size="23" font-family="Arial">Result: 14 tests, all passed (OK)</text>
+  <text x="60" y="238" fill="#dbe4ee" font-size="23" font-family="Arial"></text>
+  <text x="60" y="274" fill="#dbe4ee" font-size="23" font-family="Arial">Validated:</text>
+  <text x="60" y="310" fill="#dbe4ee" font-size="23" font-family="Arial">- Rendering plan step coverage (Step 1..10)</text>
+  <text x="60" y="346" fill="#dbe4ee" font-size="23" font-family="Arial">- Each task has dependency + DoD checks</text>
+  <text x="60" y="382" fill="#dbe4ee" font-size="23" font-family="Arial">- UI test-readiness contract exists and is complete</text>
+  <text x="60" y="418" fill="#dbe4ee" font-size="23" font-family="Arial"></text>
+  <text x="60" y="454" fill="#dbe4ee" font-size="23" font-family="Arial">Not validated yet:</text>
+  <text x="60" y="490" fill="#dbe4ee" font-size="23" font-family="Arial">- Real Pixi scene rendering in browser</text>
+  <text x="60" y="526" fill="#dbe4ee" font-size="23" font-family="Arial">- Playable UI behavior (camera, overlays, VFX) at runtime</text>
+</svg>
