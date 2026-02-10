@@ -112,6 +112,18 @@ export class RenderingScene {
       this.vfxRuntime.tick(this.elapsedMs);
       this.overlayRuntime.beginFrame(this.frame);
       this.overlayRuntime.syncBaseOverlays(this.world.overlays);
+      const cameraState = this.camera.getState();
+      if (cameraState.mode === "follow" && cameraState.followTargetId) {
+        const followTarget = this.world.entities.find((e) => e.id === cameraState.followTargetId);
+        if (followTarget) {
+          this.camera.updateFollow(
+            followTarget.grid,
+            this.world.tileWidth,
+            this.world.tileHeight,
+            frameMs / 1000,
+          );
+        }
+      }
 
       const qualityTier = this.performanceRuntime.getQualityTier();
       if (qualityTier === "low") {

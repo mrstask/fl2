@@ -86,3 +86,152 @@ test("supports overlay toggles and keeps app responsive", async ({ page }, testI
     fullPage: true,
   });
 });
+
+test("supports follow camera mode and tracks player movement", async ({ page }) => {
+  await waitForScene(page);
+
+  const modeToggle = page.getByTestId("camera-mode-toggle");
+  await expect(modeToggle).toContainText("CameraMode: free");
+
+  const before = await page.evaluate(() => {
+    const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+    return api?.getCamera?.()?.position ?? null;
+  });
+  expect(before).not.toBeNull();
+  if (!before) {
+    return;
+  }
+
+  await modeToggle.click();
+  await expect(modeToggle).toContainText("CameraMode: follow");
+
+  await page.evaluate(() => {
+    const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+    api?.moveToTile(6, 12);
+  });
+
+  await expect
+    .poll(async () => {
+      return await page.evaluate(() => {
+        const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+        const camera = api?.getCamera?.();
+        const player = api?.getEntity?.("actor_player");
+        return {
+          mode: camera?.mode ?? "unknown",
+          cameraX: camera?.position?.x ?? null,
+          cameraY: camera?.position?.y ?? null,
+          playerX: player?.grid?.x ?? null,
+          playerY: player?.grid?.y ?? null,
+        };
+      });
+    }, { timeout: 8000 })
+    .toMatchObject({
+      mode: "follow",
+      playerX: 6,
+      playerY: 12,
+    });
+
+  const after = await page.evaluate(() => {
+    const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+    return api?.getCamera?.()?.position ?? null;
+  });
+  expect(after).not.toBeNull();
+  if (!after) {
+    return;
+  }
+  expect(after).not.toEqual(before);
+});
+
+test("supports edge scrolling camera pan", async ({ page }) => {
+  await waitForScene(page);
+
+  const canvas = page.getByTestId("render-canvas");
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) {
+    return;
+  }
+
+  const before = await page.evaluate(() => {
+    const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+    return api?.getCamera?.()?.position ?? null;
+  });
+  expect(before).not.toBeNull();
+  if (!before) {
+    return;
+  }
+
+  await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
+  await page.waitForTimeout(500);
+
+  await expect
+    .poll(async () => {
+      return await page.evaluate(() => {
+        const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+        const camera = api?.getCamera?.();
+        return camera?.position?.x ?? null;
+      });
+    })
+    .not.toBe(before.x);
+});
+
+test("supports middle-mouse drag panning", async ({ page }) => {
+  await waitForScene(page);
+
+  const canvas = page.getByTestId("render-canvas");
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) {
+    return;
+  }
+
+  const cx = box.x + box.width * 0.5;
+  const cy = box.y + box.height * 0.5;
+
+  const before = await page.evaluate(() => {
+    const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+    return api?.getCamera?.()?.position ?? null;
+  });
+  expect(before).not.toBeNull();
+  if (!before) {
+    return;
+  }
+
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(cx - 120, cy + 80, { steps: 10 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForTimeout(120);
+
+  await expect
+    .poll(async () => {
+      return await page.evaluate(() => {
+        const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+        return api?.getCamera?.()?.position ?? null;
+      });
+    })
+    .not.toEqual(before);
+});
+
+test("right-click cancels active movement command", async ({ page }) => {
+  await waitForScene(page);
+
+  const canvas = page.getByTestId("render-canvas");
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) {
+    return;
+  }
+
+  await page.evaluate(() => {
+    const api = (window as unknown as { __ashfallDebug?: any }).__ashfallDebug;
+    api?.moveToTile(16, 16);
+  });
+
+  await expect
+    .poll(async () => await page.getByTestId("command-state").textContent())
+    .toMatch(/Command: (active|queued)/);
+
+  await page.mouse.click(box.x + box.width * 0.35, box.y + box.height * 0.35, { button: "right" });
+  await expect(page.getByTestId("command-state")).toContainText("Command: cancelled");
+});

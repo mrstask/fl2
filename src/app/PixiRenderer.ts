@@ -27,6 +27,34 @@ type AdapterOptions = {
   onPathPreviewState?: (state: "idle" | "valid" | "invalid" | "fallback") => void;
   onDoorState?: (state: "open" | "closed" | "locked" | "n/a") => void;
   onCommandState?: (state: "none" | "queued" | "active" | "cancelled") => void;
+  onInteractionIntent?: (intent: "none" | "move" | "move+open" | "open" | "close" | "locked" | "blocked" | "select") => void;
+  onDoorContextMenu?: (menu: DoorContextMenuPayload | null) => void;
+};
+
+export type RendererRuntimeState = {
+  npcPatrolIndex: number;
+  queuedTarget: GridPos | null;
+  activeDestination: GridPos | null;
+  playerTarget: GridPos | null;
+  moving: boolean;
+  pendingDoorId: string | null;
+};
+
+type InteractionIntent =
+  | "none"
+  | "move"
+  | "move+open"
+  | "open"
+  | "close"
+  | "locked"
+  | "blocked"
+  | "select";
+
+export type DoorMenuAction = "open" | "close" | "key" | "lockpick";
+export type DoorContextMenuPayload = {
+  doorId: string;
+  doorState: "open" | "closed" | "locked";
+  position: { x: number; y: number };
 };
 
 const GROUND_COLOR = 0x2f3d4c;
@@ -171,9 +199,18 @@ export class PixiRenderer {
   private npcPatrolIndex = 0;
   private npcMoveAccumulatorMs = 0;
   private readonly npcMoveStepMs = 260;
+  private pendingDoorInteraction: { doorId: string; action: DoorMenuAction } | null = null;
   private canvasListenersBound = false;
+  private lastInteractionIntent: InteractionIntent = "none";
+  private isMiddleDragging = false;
+  private dragLastViewport: { x: number; y: number } | null = null;
+  private pointerViewport: { x: number; y: number } | null = null;
+  private pointerInCanvas = false;
   private readonly onMouseMove = (event: MouseEvent): void => this.onPointerMove(event);
   private readonly onClick = (event: MouseEvent): void => this.onPointerClick(event);
+  private readonly onMouseDown = (event: MouseEvent): void => this.onMouseDownEvent(event);
+  private readonly onMouseUp = (event: MouseEvent): void => this.onMouseUpEvent(event);
+  private readonly onMouseLeave = (): void => this.onMouseLeaveEvent();
   private readonly onContextMenu = (event: MouseEvent): void => this.onRightClick(event);
   private readonly onWheelEvent = (event: WheelEvent): void => this.onWheel(event);
   private readonly onKeyDownEvent = (event: KeyboardEvent): void => this.onKeyDown(event);
@@ -200,6 +237,9 @@ export class PixiRenderer {
     app.stage.addChild(this.root);
 
     app.canvas.addEventListener("mousemove", this.onMouseMove);
+    app.canvas.addEventListener("mousedown", this.onMouseDown);
+    app.canvas.addEventListener("mouseup", this.onMouseUp);
+    app.canvas.addEventListener("mouseleave", this.onMouseLeave);
     app.canvas.addEventListener("click", this.onClick);
     app.canvas.addEventListener("contextmenu", this.onContextMenu);
     app.canvas.addEventListener("wheel", this.onWheelEvent);
@@ -216,6 +256,7 @@ export class PixiRenderer {
   }
 
   public render(): void {
+    this.applyEdgeScroll();
     this.advanceNpcPatrol();
     this.advancePlayerMovement();
     try {
@@ -327,6 +368,9 @@ export class PixiRenderer {
   public destroy(): void {
     if (this.app && this.canvasListenersBound) {
       this.app.canvas.removeEventListener("mousemove", this.onMouseMove);
+      this.app.canvas.removeEventListener("mousedown", this.onMouseDown);
+      this.app.canvas.removeEventListener("mouseup", this.onMouseUp);
+      this.app.canvas.removeEventListener("mouseleave", this.onMouseLeave);
       this.app.canvas.removeEventListener("click", this.onClick);
       this.app.canvas.removeEventListener("contextmenu", this.onContextMenu);
       this.app.canvas.removeEventListener("wheel", this.onWheelEvent);
@@ -353,7 +397,45 @@ export class PixiRenderer {
     if (!snapshot) {
       return false;
     }
-    return this.tryHandleDoorClick(entityId, snapshot);
+    const entity = snapshot.entities.find((e) => e.id === entityId);
+    if (!entity || entity.obstacleType !== "door") {
+      return false;
+    }
+    const fallbackAction: DoorMenuAction = entity.doorState === "open" ? "close" : "open";
+    return this.performDoorAction(entityId, fallbackAction);
+  }
+
+  public performDoorAction(entityId: string, action: DoorMenuAction): boolean {
+    const snapshot = this.scene.getFrameSnapshot();
+    if (!snapshot) {
+      return false;
+    }
+    return this.tryPerformDoorAction(entityId, action, snapshot);
+  }
+
+  public debugExportRuntimeState(): RendererRuntimeState {
+    return {
+      npcPatrolIndex: this.npcPatrolIndex,
+      queuedTarget: this.queuedTarget ? { ...this.queuedTarget } : null,
+      activeDestination: this.activeDestination ? { ...this.activeDestination } : null,
+      playerTarget: this.playerTarget ? { ...this.playerTarget } : null,
+      moving: this.isPlayerMoving(),
+      pendingDoorId: this.pendingDoorInteraction?.doorId ?? null,
+    };
+  }
+
+  public debugImportRuntimeState(state: Partial<RendererRuntimeState>): void {
+    if (typeof state.npcPatrolIndex === "number") {
+      const max = Math.max(1, this.npcPatrolPath.length);
+      this.npcPatrolIndex = ((Math.floor(state.npcPatrolIndex) % max) + max) % max;
+    }
+    this.queuedTarget = state.queuedTarget ? { ...state.queuedTarget } : null;
+    this.activeDestination = state.activeDestination ? { ...state.activeDestination } : null;
+    this.playerTarget = state.playerTarget ? { ...state.playerTarget } : null;
+    this.pendingDoorInteraction =
+      typeof state.pendingDoorId === "string" && state.pendingDoorId.length > 0
+        ? { doorId: state.pendingDoorId, action: "open" }
+        : null;
   }
 
   private onPointerMove(event: MouseEvent): void {
@@ -363,6 +445,25 @@ export class PixiRenderer {
     }
     const rect = this.app.canvas.getBoundingClientRect();
     const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    this.pointerViewport = pointer;
+    this.pointerInCanvas = true;
+
+    if (this.isMiddleDragging && this.dragLastViewport) {
+      const dx = pointer.x - this.dragLastViewport.x;
+      const dy = pointer.y - this.dragLastViewport.y;
+      const zoom = this.scene.getCamera().getState().zoom;
+      this.scene.getCamera().panBy({ x: -dx / zoom, y: -dy / zoom });
+      this.dragLastViewport = pointer;
+      if (this.app) {
+        this.app.canvas.style.cursor = "grabbing";
+      }
+      return;
+    }
+
+    if (this.app) {
+      this.app.canvas.style.cursor = "default";
+    }
+
     const result = pickAtPointer(
       pointer,
       this.scene.getCamera().getState(),
@@ -371,6 +472,8 @@ export class PixiRenderer {
       snapshot.tileWidth,
       snapshot.tileHeight,
     );
+    this.updateCursorForPick(result, snapshot);
+    this.emitInteractionIntent(this.predictInteractionIntent(result, snapshot));
 
     this.options.onPickEvent?.({ eventType: "hover", pick: result });
 
@@ -410,6 +513,43 @@ export class PixiRenderer {
     }
   }
 
+  private onMouseDownEvent(event: MouseEvent): void {
+    if (!this.app) {
+      return;
+    }
+    if (event.button !== 1) {
+      return;
+    }
+    event.preventDefault();
+    const rect = this.app.canvas.getBoundingClientRect();
+    this.dragLastViewport = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    this.isMiddleDragging = true;
+    this.app.canvas.style.cursor = "grabbing";
+  }
+
+  private onMouseUpEvent(event: MouseEvent): void {
+    if (!this.app) {
+      return;
+    }
+    if (event.button !== 1) {
+      return;
+    }
+    this.isMiddleDragging = false;
+    this.dragLastViewport = null;
+    this.app.canvas.style.cursor = "default";
+  }
+
+  private onMouseLeaveEvent(): void {
+    this.pointerInCanvas = false;
+    this.pointerViewport = null;
+    this.isMiddleDragging = false;
+    this.dragLastViewport = null;
+    if (this.app) {
+      this.app.canvas.style.cursor = "default";
+    }
+    this.emitInteractionIntent("none");
+  }
+
   private onPointerClick(event: MouseEvent): void {
     const snapshot = this.scene.getFrameSnapshot();
     if (!snapshot || !this.app) {
@@ -425,6 +565,7 @@ export class PixiRenderer {
       snapshot.tileWidth,
       snapshot.tileHeight,
     );
+    this.emitInteractionIntent(this.predictInteractionIntent(result, snapshot));
 
     this.options.onPickEvent?.({ eventType: "click", pick: result });
 
@@ -441,11 +582,21 @@ export class PixiRenderer {
         result.type === "entity" ? result.entityId : null,
       );
 
-      if (result.type === "entity" && this.tryHandleDoorClick(result.entityId, snapshot)) {
-        return;
+      if (result.type === "entity") {
+        const entity = snapshot.entities.find((e) => e.id === result.entityId);
+        if (entity?.obstacleType === "door") {
+          this.options.onDoorContextMenu?.({
+            doorId: entity.id,
+            doorState: entity.doorState ?? "closed",
+            position: pointer,
+          });
+          return;
+        }
+        this.options.onDoorContextMenu?.(null);
       }
 
       if (tilePick.type === "tile") {
+        this.options.onDoorContextMenu?.(null);
         if (this.isPlayerMoving()) {
           this.queuedTarget = { ...tilePick.grid };
           this.options.onCommandState?.("queued");
@@ -455,6 +606,7 @@ export class PixiRenderer {
         this.tryPlanPlayerMovement(tilePick.grid, snapshot);
       }
     } else {
+      this.options.onDoorContextMenu?.(null);
       this.selectedTile = null;
       this.scene.setSelectedTile(null);
       this.scene.setPathPreview([]);
@@ -473,6 +625,41 @@ export class PixiRenderer {
   private onRightClick(event: MouseEvent): void {
     event.preventDefault();
     this.cancelMovement("cancelled");
+    this.emitInteractionIntent("none");
+    this.options.onDoorContextMenu?.(null);
+  }
+
+  private applyEdgeScroll(): void {
+    const snapshot = this.scene.getFrameSnapshot();
+    if (!snapshot || !this.app || !this.pointerInCanvas || !this.pointerViewport || this.isMiddleDragging) {
+      return;
+    }
+    const margin = 24;
+    const speedPxPerSec = 520;
+    const dt = snapshot.diagnostics.frameMs / 1000;
+    const zoom = this.scene.getCamera().getState().zoom;
+    const worldStep = (speedPxPerSec * dt) / zoom;
+    let panX = 0;
+    let panY = 0;
+
+    const viewWidth = this.app.canvas.clientWidth || this.options.width;
+    const viewHeight = this.app.canvas.clientHeight || this.options.height;
+
+    if (this.pointerViewport.x <= margin) {
+      panX -= worldStep;
+    } else if (this.pointerViewport.x >= viewWidth - margin) {
+      panX += worldStep;
+    }
+
+    if (this.pointerViewport.y <= margin) {
+      panY -= worldStep;
+    } else if (this.pointerViewport.y >= viewHeight - margin) {
+      panY += worldStep;
+    }
+
+    if (panX !== 0 || panY !== 0) {
+      this.scene.getCamera().panBy({ x: panX, y: panY });
+    }
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -499,17 +686,22 @@ export class PixiRenderer {
     }
   }
 
-  private tryPlanPlayerMovement(targetTile: GridPos, snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>): void {
+  private tryPlanPlayerMovement(
+    targetTile: GridPos,
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+    options?: { allowTargetFallback?: boolean; movementStatus?: string },
+  ): boolean {
     const player = snapshot.entities.find((e) => e.id === "actor_player");
     if (!player) {
-      return;
+      return false;
     }
 
+    const allowTargetFallback = options?.allowTargetFallback ?? true;
     const navGrid = this.buildNavigationGrid(snapshot, "actor_player");
     const navResult = findNavigationPath(player.grid, targetTile, navGrid, {
       allowDiagonal: true,
       preventCornerCutting: true,
-      allowTargetFallback: true,
+      allowTargetFallback,
       maxFallbackRadius: 8,
       maxIterations: 6000,
     });
@@ -529,7 +721,7 @@ export class PixiRenderer {
           reason: "unreachable",
         },
       });
-      return;
+      return false;
     }
 
     this.playerPath = path;
@@ -540,7 +732,9 @@ export class PixiRenderer {
     this.repathAttempts = 0;
     this.scene.setPathPreview(path);
     this.options.onPathPreviewState?.(navResult.usedFallback ? "fallback" : "valid");
-    this.options.onMovementStatus?.(navResult.usedFallback ? "fallback-path" : "moving");
+    this.options.onMovementStatus?.(
+      options?.movementStatus ?? (navResult.usedFallback ? "fallback-path" : "moving"),
+    );
     this.options.onCommandState?.("active");
     this.scene.dispatch({
       id: `evt_move_started_${snapshot.diagnostics.frame}`,
@@ -553,6 +747,7 @@ export class PixiRenderer {
         toGrid: { ...path[path.length - 1] },
       },
     });
+    return true;
   }
 
   private advancePlayerMovement(): void {
@@ -637,6 +832,13 @@ export class PixiRenderer {
         this.options.onPathPreviewState?.("idle");
         this.options.onMovementStatus?.("arrived");
         this.options.onCommandState?.("none");
+
+        if (this.pendingDoorInteraction) {
+          const latest = this.scene.getFrameSnapshot();
+          if (latest) {
+            this.finishPendingDoorInteraction(latest);
+          }
+        }
 
         if (this.queuedTarget) {
           const queued = { ...this.queuedTarget };
@@ -774,8 +976,85 @@ export class PixiRenderer {
     this.scene.getCamera().setPosition(world);
   }
 
-  private tryHandleDoorClick(
+  private predictInteractionIntent(
+    pick: PickResult,
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+  ): InteractionIntent {
+    if (pick.type === "none") {
+      return "none";
+    }
+
+    const player = snapshot.entities.find((e) => e.id === "actor_player");
+    if (!player) {
+      return "none";
+    }
+
+    if (pick.type === "entity") {
+      const entity = snapshot.entities.find((e) => e.id === pick.entityId);
+      if (!entity) {
+        return "none";
+      }
+      if (entity.obstacleType === "door") {
+        if (entity.doorState === "locked") {
+          return "locked";
+        }
+        if (entity.doorState === "open") {
+          return "close";
+        }
+        if (this.isAdjacent(player.grid, entity.grid)) {
+          return "open";
+        }
+        const approachTile = this.findDoorApproachTile(snapshot, player.grid, entity.grid);
+        return approachTile ? "move+open" : "blocked";
+      }
+      if (entity.kind === "actor") {
+        return "select";
+      }
+      if (entity.obstacleType === "wall") {
+        return "blocked";
+      }
+      return "select";
+    }
+
+    const navGrid = this.buildNavigationGrid(snapshot, "actor_player");
+    const navResult = findNavigationPath(player.grid, pick.grid, navGrid, {
+      allowDiagonal: true,
+      preventCornerCutting: true,
+      allowTargetFallback: true,
+      maxFallbackRadius: 8,
+      maxIterations: 6000,
+    });
+    return navResult.path.length > 1 ? "move" : "blocked";
+  }
+
+  private emitInteractionIntent(intent: InteractionIntent): void {
+    if (this.lastInteractionIntent === intent) {
+      return;
+    }
+    this.lastInteractionIntent = intent;
+    this.options.onInteractionIntent?.(intent);
+  }
+
+  private updateCursorForPick(
+    pick: PickResult,
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+  ): void {
+    if (!this.app) {
+      return;
+    }
+    if (pick.type === "entity") {
+      const entity = snapshot.entities.find((e) => e.id === pick.entityId);
+      if (entity?.obstacleType === "door") {
+        this.app.canvas.style.cursor = "pointer";
+        return;
+      }
+    }
+    this.app.canvas.style.cursor = "default";
+  }
+
+  private tryPerformDoorAction(
     entityId: string,
+    action: DoorMenuAction,
     snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
   ): boolean {
     const entity = snapshot.entities.find((e) => e.id === entityId);
@@ -784,27 +1063,218 @@ export class PixiRenderer {
       return false;
     }
 
-    if (entity.doorState === "locked") {
-      this.options.onMovementStatus?.("door-locked");
-      this.options.onDoorState?.("locked");
+    if (action === "key" || action === "lockpick") {
+      if (entity.doorState !== "locked") {
+        this.options.onMovementStatus?.("door-not-locked");
+        this.options.onDoorState?.(entity.doorState ?? "n/a");
+        return true;
+      }
+      return this.tryExecuteDoorActionWithApproach(entity, action, snapshot);
+    }
+
+    if (action === "open") {
+      if (entity.doorState === "locked") {
+        this.options.onMovementStatus?.("door-locked");
+        this.options.onDoorState?.("locked");
+        return true;
+      }
+      if (entity.doorState === "open") {
+        this.options.onMovementStatus?.("door-already-open");
+        this.options.onDoorState?.("open");
+        return true;
+      }
+      return this.tryExecuteDoorActionWithApproach(entity, "open", snapshot);
+    }
+
+    if (action === "close") {
+      if (entity.doorState === "locked") {
+        this.options.onMovementStatus?.("door-locked");
+        this.options.onDoorState?.("locked");
+        return true;
+      }
+      if (entity.doorState === "closed") {
+        this.options.onMovementStatus?.("door-already-closed");
+        this.options.onDoorState?.("closed");
+        return true;
+      }
+      return this.tryExecuteDoorActionWithApproach(entity, "close", snapshot);
+    }
+
+    return false;
+  }
+
+  private tryExecuteDoorActionWithApproach(
+    door: RenderEntity,
+    action: DoorMenuAction,
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+  ): boolean {
+    const player = snapshot.entities.find((e) => e.id === "actor_player");
+    if (!player) {
       return true;
     }
 
-    const nextState = entity.doorState === "open" ? "closed" : "open";
-    const changed = this.scene.setEntityDoorState(entity.id, nextState);
-    if (changed) {
-      this.options.onMovementStatus?.(nextState === "open" ? "door-opened" : "door-closed");
-      this.options.onDoorState?.(nextState);
-      this.scene.dispatch({
-        id: `evt_door_${entity.id}_${snapshot.diagnostics.frame}`,
-        type: "blocked",
-        sourceId: entity.id,
-        frame: snapshot.diagnostics.frame,
-        timeMs: this.scene.getElapsedMs(),
-        payload: { doorState: nextState },
-      });
+    if (this.isAdjacent(player.grid, door.grid)) {
+      this.pendingDoorInteraction = null;
+      this.executeDoorActionAtRange(door, action, snapshot);
+      return true;
+    }
+
+    const approachTile = this.findDoorApproachTile(snapshot, player.grid, door.grid);
+    if (!approachTile) {
+      this.pendingDoorInteraction = null;
+      this.options.onMovementStatus?.("door-unreachable");
+      this.options.onDoorState?.(door.doorState ?? "n/a");
+      return true;
+    }
+
+    this.pendingDoorInteraction = { doorId: door.id, action };
+    this.queuedTarget = null;
+    const planned = this.tryPlanPlayerMovement(approachTile, snapshot, {
+      allowTargetFallback: false,
+      movementStatus: "moving-to-door",
+    });
+    if (!planned) {
+      this.pendingDoorInteraction = null;
+      this.options.onMovementStatus?.("door-unreachable");
+      this.options.onDoorState?.(door.doorState ?? "n/a");
     }
     return true;
+  }
+
+  private finishPendingDoorInteraction(
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+  ): void {
+    const pending = this.pendingDoorInteraction;
+    if (!pending) {
+      return;
+    }
+
+    const door = snapshot.entities.find((e) => e.id === pending.doorId);
+    const player = snapshot.entities.find((e) => e.id === "actor_player");
+    this.pendingDoorInteraction = null;
+    if (!door || !player || door.obstacleType !== "door") {
+      return;
+    }
+    if (!this.isAdjacent(player.grid, door.grid)) {
+      this.options.onMovementStatus?.("door-unreachable");
+      this.options.onDoorState?.(door.doorState ?? "n/a");
+      return;
+    }
+    this.executeDoorActionAtRange(door, pending.action, snapshot);
+  }
+
+  private executeDoorActionAtRange(
+    door: RenderEntity,
+    action: DoorMenuAction,
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+  ): void {
+    if (action === "open") {
+      if (door.doorState === "locked") {
+        this.options.onMovementStatus?.("door-locked");
+        this.options.onDoorState?.("locked");
+        return;
+      }
+      this.applyDoorState(door.id, "open", snapshot);
+      return;
+    }
+    if (action === "close") {
+      if (door.doorState === "locked") {
+        this.options.onMovementStatus?.("door-locked");
+        this.options.onDoorState?.("locked");
+        return;
+      }
+      this.applyDoorState(door.id, "closed", snapshot);
+      return;
+    }
+    if (door.doorState !== "locked") {
+      this.options.onMovementStatus?.("door-not-locked");
+      this.options.onDoorState?.(door.doorState ?? "n/a");
+      return;
+    }
+    const changed = this.scene.setEntityDoorState(door.id, "closed");
+    if (!changed) {
+      return;
+    }
+    this.options.onMovementStatus?.(action === "key" ? "door-unlocked-key" : "door-unlocked-lockpick");
+    this.options.onDoorState?.("closed");
+    this.scene.dispatch({
+      id: `evt_door_unlock_${door.id}_${snapshot.diagnostics.frame}`,
+      type: "blocked",
+      sourceId: door.id,
+      frame: snapshot.diagnostics.frame,
+      timeMs: this.scene.getElapsedMs(),
+      payload: { unlockedBy: action },
+    });
+  }
+
+  private applyDoorState(
+    doorId: string,
+    nextState: "open" | "closed",
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+  ): void {
+    const changed = this.scene.setEntityDoorState(doorId, nextState);
+    if (!changed) {
+      return;
+    }
+    this.options.onMovementStatus?.(nextState === "open" ? "door-opened" : "door-closed");
+    this.options.onDoorState?.(nextState);
+    this.scene.dispatch({
+      id: `evt_door_${doorId}_${snapshot.diagnostics.frame}`,
+      type: "blocked",
+      sourceId: doorId,
+      frame: snapshot.diagnostics.frame,
+      timeMs: this.scene.getElapsedMs(),
+      payload: { doorState: nextState },
+    });
+  }
+
+  private findDoorApproachTile(
+    snapshot: NonNullable<ReturnType<RenderingScene["getFrameSnapshot"]>>,
+    playerGrid: GridPos,
+    doorGrid: GridPos,
+  ): GridPos | null {
+    const navGrid = this.buildNavigationGrid(snapshot, "actor_player");
+    const candidates: GridPos[] = [];
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if (dx === 0 && dy === 0) {
+          continue;
+        }
+        const pos = { x: doorGrid.x + dx, y: doorGrid.y + dy };
+        if (!navGrid.isWalkable(pos, { ignoreBodyId: "actor_player" })) {
+          continue;
+        }
+        candidates.push(pos);
+      }
+    }
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    let best: { tile: GridPos; pathLen: number } | null = null;
+    for (const tile of candidates) {
+      const result = findNavigationPath(playerGrid, tile, navGrid, {
+        allowDiagonal: true,
+        preventCornerCutting: true,
+        allowTargetFallback: false,
+        maxFallbackRadius: 0,
+        maxIterations: 6000,
+      });
+      if (result.path.length <= 0) {
+        continue;
+      }
+      const pathLen = result.path.length;
+      if (!best || pathLen < best.pathLen) {
+        best = { tile, pathLen };
+      }
+    }
+    return best?.tile ?? null;
+  }
+
+  private isAdjacent(a: GridPos, b: GridPos): boolean {
+    const dx = Math.abs(a.x - b.x);
+    const dy = Math.abs(a.y - b.y);
+    return dx <= 1 && dy <= 1 && (dx !== 0 || dy !== 0);
   }
 
   private advanceNpcPatrol(): void {

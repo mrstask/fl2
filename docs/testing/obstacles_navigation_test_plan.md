@@ -101,6 +101,18 @@
 - Start movement along corridor while patrol NPC crosses.
 - Assert: `repathing` or fallback status appears before arrival.
 
+### `NAV-E11` Door interaction requires approach
+- Click closed unlocked door while player is out of interaction range.
+- Assert: movement status enters `moving-to-door`; door opens only after player reaches adjacent tile.
+
+### `NAV-E12` Door cursor and context menu actions
+- Hover door tile.
+- Assert: cursor switches to hand (`pointer`).
+- Click door and move pointer to menu.
+- Assert: menu remains visible and action buttons are clickable.
+- Execute `open` action.
+- Assert: approach-then-open flow still applies and state updates to open.
+
 ## 4. Test Data Requirements
 1. Test map fixture with deterministic coordinates for:
 - walls

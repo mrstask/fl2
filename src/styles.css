@@ -55,9 +55,206 @@ body,
 }
 
 .viewport {
+  position: relative;
   width: 100%;
   height: 100%;
   border: 1px solid #30445a;
   border-radius: 8px;
   overflow: hidden;
+}
+
+.door-sprite-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.door-sprite {
+  position: absolute;
+  width: 52px;
+  height: 78px;
+  pointer-events: none;
+  transform-origin: 50% 100%;
+  filter: drop-shadow(0 5px 10px rgba(0, 0, 0, 0.46));
+}
+
+.door-sprite.orient-ne {
+  transform: translate(-50%, -100%) skewY(-26.565deg);
+}
+
+.door-sprite.orient-nw {
+  transform: translate(-50%, -100%) skewY(26.565deg);
+}
+
+.door-frame {
+  position: absolute;
+  inset: 0;
+  border: 2px solid #6c5438;
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg, #8a7657 0%, #5f4a35 48%, #3f3124 100%);
+  box-shadow: inset 0 0 0 1px rgba(24, 19, 14, 0.62);
+}
+
+.door-frame::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border: 1px solid #656b72;
+  background:
+    radial-gradient(circle at 22% 30%, rgba(240, 240, 240, 0.24) 0%, transparent 36%),
+    linear-gradient(180deg, #858c93 0%, #62686f 55%, #4d5359 100%);
+}
+
+.door-hinge {
+  position: absolute;
+  left: -2px;
+  width: 4px;
+  height: 12px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #3e3227, #221a14);
+}
+
+.hinge-top {
+  top: 12px;
+}
+
+.hinge-bottom {
+  top: 38px;
+}
+
+.door-leaf {
+  position: absolute;
+  width: 30px;
+  height: 56px;
+  left: 12px;
+  top: 9px;
+  border: 1px solid #4b4f54;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0) 30%),
+    linear-gradient(180deg, #7a8188 0%, #60666d 45%, #50575f 100%);
+  box-shadow: inset 0 0 0 1px rgba(26, 31, 36, 0.5);
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+.door-wheel {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  left: 15px;
+  top: 27px;
+  border-radius: 50%;
+  border: 1px solid #2f353a;
+  background: radial-gradient(circle at 30% 30%, #4f8dc3 0%, #2f5c89 68%, #224364 100%);
+  box-shadow: 0 0 0 1px rgba(20, 20, 20, 0.35), 0 0 6px rgba(0, 0, 0, 0.35);
+  transition: transform 120ms ease;
+}
+
+.door-wheel-core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px solid #8c6b22;
+  background: #d1b649;
+  color: #2e2416;
+  font-size: 8px;
+  line-height: 12px;
+  font-weight: 700;
+  text-align: center;
+  font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+}
+
+.door-wheel-spoke {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 12px;
+  background: linear-gradient(180deg, #1f2429, #5d6770);
+  transform-origin: 50% 2px;
+}
+
+.spoke-1 {
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+
+.spoke-2 {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.spoke-3 {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.spoke-4 {
+  transform: translate(-50%, -50%) rotate(135deg);
+}
+
+.door-sprite.state-open .door-leaf {
+  opacity: 0.78;
+}
+
+.door-sprite.orient-ne.state-open .door-leaf,
+.door-sprite.orient-ne.state-open .door-wheel {
+  transform: translateX(12px);
+}
+
+.door-sprite.orient-nw.state-open .door-leaf,
+.door-sprite.orient-nw.state-open .door-wheel {
+  transform: translateX(-12px);
+}
+
+.door-sprite.state-open .door-wheel {
+  filter: saturate(0.75);
+}
+
+.door-sprite.state-locked .door-wheel {
+  background: radial-gradient(circle at 30% 30%, #6f7580 0%, #3d424a 68%, #2d3035 100%);
+  box-shadow: 0 0 0 1px rgba(20, 20, 20, 0.35), 0 0 7px rgba(239, 83, 70, 0.5);
+}
+
+.door-sprite.state-locked .door-wheel-core {
+  border-color: #8c2722;
+  background: #db4a40;
+  color: #fff2eb;
+}
+
+.door-context-menu {
+  position: absolute;
+  z-index: 6;
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #4b637c;
+  border-radius: 6px;
+  background: rgba(12, 18, 26, 0.94);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+
+.door-context-title {
+  font-size: 12px;
+  color: #9fb4ca;
+  margin-bottom: 2px;
+}
+
+.door-context-menu button {
+  border: 1px solid #4e6a87;
+  border-radius: 4px;
+  background: #1f3144;
+  color: #d4dfeb;
+  font-size: 12px;
+  padding: 4px 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.door-context-menu button:hover {
+  background: #294864;
 }

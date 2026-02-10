@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { PixiRenderer } from "./PixiRenderer";
+import {
+  PixiRenderer,
+  type DoorContextMenuPayload,
+  type DoorMenuAction,
+  type RendererRuntimeState,
+} from "./PixiRenderer";
 import { createDemoWorld } from "./createDemoWorld";
-import { RenderingScene, worldToScreen, type CameraState } from "../modules/rendering";
+import { RenderingScene, worldToScreen, worldToViewport, type CameraState } from "../modules/rendering";
 
 function createInitialCamera(width: number, height: number): CameraState {
   return {
@@ -51,9 +56,41 @@ function fitCameraToWorld(scene: RenderingScene): void {
   camera.setPosition(center);
 }
 
+const SAVE_KEY_PREFIX = "ashfall_demo_state_v1_slot_";
+
+type PersistedEntityState = {
+  id: string;
+  x: number;
+  y: number;
+  doorState?: "open" | "closed" | "locked";
+};
+
+type PersistedState = {
+  version: 1;
+  savedAt: number;
+  camera: {
+    x: number;
+    y: number;
+    zoom: number;
+  };
+  entities: PersistedEntityState[];
+  runtime: RendererRuntimeState;
+  movementStatus: string;
+  commandState: "none" | "queued" | "active" | "cancelled";
+};
+
+type DoorVisual = {
+  id: string;
+  x: number;
+  y: number;
+  state: "open" | "closed" | "locked";
+  orientation: "ne" | "nw";
+};
+
 export function App(): JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<RenderingScene | null>(null);
+  const rendererRef = useRef<PixiRenderer | null>(null);
   const [fps, setFps] = useState("0.0");
   const [zoom, setZoom] = useState("1.00");
   const [drawCalls, setDrawCalls] = useState("0");
@@ -74,6 +111,12 @@ export function App(): JSX.Element {
   const [doorClosedState, setDoorClosedState] = useState("unknown");
   const [doorLockedState, setDoorLockedState] = useState("unknown");
   const [commandState, setCommandState] = useState<"none" | "queued" | "active" | "cancelled">("none");
+  const [saveStateStatus, setSaveStateStatus] = useState("idle");
+  const [saveSlot, setSaveSlot] = useState<1 | 2 | 3>(1);
+  const [cameraMode, setCameraMode] = useState<CameraState["mode"]>("free");
+  const [interactionIntent, setInteractionIntent] = useState("none");
+  const [doorMenu, setDoorMenu] = useState<DoorContextMenuPayload | null>(null);
+  const [doorVisuals, setDoorVisuals] = useState<DoorVisual[]>([]);
   const movementStatusRef = useRef(movementStatus);
   const pathPreviewStateRef = useRef(pathPreviewState);
 
@@ -138,11 +181,21 @@ export function App(): JSX.Element {
       onCommandState: (state) => {
         setCommandState(state);
       },
+      onInteractionIntent: (intent) => {
+        setInteractionIntent(intent);
+      },
+      onDoorContextMenu: (menu) => {
+        setDoorMenu(menu);
+      },
     });
+    rendererRef.current = renderer;
     (window as unknown as { __ashfallDebug?: Record<string, unknown> }).__ashfallDebug = {
       moveToTile: (x: number, y: number) => renderer.debugMoveToTile({ x, y }),
       interactEntity: (id: string) => renderer.debugInteractEntity(id),
       getEntity: (id: string) => scene.getEntityById(id),
+      getCamera: () => scene.getCamera().getState(),
+      setCameraMode: (mode: CameraState["mode"]) => scene.getCamera().setMode(mode, mode === "follow" ? "actor_player" : undefined),
+      doorAction: (id: string, action: DoorMenuAction) => renderer.performDoorAction(id, action),
       getStatus: () => ({
         movementStatus: movementStatusRef.current,
         pathPreviewState: pathPreviewStateRef.current,
@@ -209,8 +262,37 @@ export function App(): JSX.Element {
         setQualityTier(diagnostics.qualityTier);
         setBudgetState(diagnostics.budgetState);
         setWarningCount(String(scene.getWarnings().length));
+        setCameraMode(scene.getCamera().getState().mode);
         const snapshot = scene.getFrameSnapshot();
         if (snapshot) {
+          const camera = scene.getCamera().getState();
+          const wallPos = new Set(
+            snapshot.entities
+              .filter((e) => e.kind === "prop" && e.obstacleType === "wall")
+              .map((e) => `${e.grid.x},${e.grid.y}`),
+          );
+          const doors = snapshot.entities
+            .filter((e) => e.kind === "prop" && e.obstacleType === "door")
+            .map((door) => {
+              const world = worldToScreen(door.grid, snapshot.tileWidth, snapshot.tileHeight);
+              const view = worldToViewport(world, camera);
+              const left = wallPos.has(`${door.grid.x - 1},${door.grid.y}`);
+              const right = wallPos.has(`${door.grid.x + 1},${door.grid.y}`);
+              const up = wallPos.has(`${door.grid.x},${door.grid.y - 1}`);
+              const down = wallPos.has(`${door.grid.x},${door.grid.y + 1}`);
+              const xAxisWeight = Number(left) + Number(right);
+              const yAxisWeight = Number(up) + Number(down);
+              const orientation: DoorVisual["orientation"] = xAxisWeight >= yAxisWeight ? "ne" : "nw";
+              return {
+                id: door.id,
+                x: view.x,
+                y: view.y + snapshot.tileHeight,
+                state: door.doorState === "open" ? "open" : door.doorState === "locked" ? "locked" : "closed",
+                orientation,
+              } satisfies DoorVisual;
+            });
+          setDoorVisuals(doors);
+
           const player = snapshot.entities.find((e) => e.id === "actor_player");
           if (player) {
             setPlayerTile(`${player.grid.x},${player.grid.y}`);
@@ -242,6 +324,7 @@ export function App(): JSX.Element {
       renderer.destroy();
       scene.dispose();
       sceneRef.current = null;
+      rendererRef.current = null;
       delete (window as unknown as { __ashfallDebug?: Record<string, unknown> }).__ashfallDebug;
     };
   }, [world]);
@@ -266,6 +349,128 @@ export function App(): JSX.Element {
     scene.setOverlayToggle("los", next);
   };
 
+  const toggleCameraMode = (): void => {
+    const scene = sceneRef.current;
+    if (!scene) {
+      return;
+    }
+    const camera = scene.getCamera();
+    const current = camera.getState().mode;
+    if (current === "follow") {
+      camera.setMode("free");
+      return;
+    }
+    camera.setMode("follow", "actor_player");
+  };
+
+  const runDoorAction = (action: DoorMenuAction): void => {
+    const renderer = rendererRef.current;
+    if (!renderer || !doorMenu) {
+      return;
+    }
+    renderer.performDoorAction(doorMenu.doorId, action);
+    setDoorMenu(null);
+  };
+
+  const saveState = (): void => {
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current;
+    if (!scene || !renderer) {
+      setSaveStateStatus("save-failed");
+      return;
+    }
+    const snapshot = scene.getFrameSnapshot();
+    if (!snapshot) {
+      setSaveStateStatus("save-failed");
+      return;
+    }
+    const camera = scene.getCamera().getState();
+    const payload: PersistedState = {
+      version: 1,
+      savedAt: Date.now(),
+      camera: {
+        x: camera.position.x,
+        y: camera.position.y,
+        zoom: camera.zoom,
+      },
+      entities: snapshot.entities.map((e) => ({
+        id: e.id,
+        x: e.grid.x,
+        y: e.grid.y,
+        doorState: e.doorState,
+      })),
+      runtime: renderer.debugExportRuntimeState(),
+      movementStatus,
+      commandState,
+    };
+    localStorage.setItem(`${SAVE_KEY_PREFIX}${saveSlot}`, JSON.stringify(payload));
+    setSaveStateStatus("saved");
+  };
+
+  const loadState = (): void => {
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current;
+    if (!scene || !renderer) {
+      setSaveStateStatus("load-failed");
+      return;
+    }
+    const raw = localStorage.getItem(`${SAVE_KEY_PREFIX}${saveSlot}`);
+    if (!raw) {
+      setSaveStateStatus("load-empty");
+      return;
+    }
+
+    try {
+      const data = JSON.parse(raw) as PersistedState;
+      if (data.version !== 1) {
+        setSaveStateStatus("load-version-mismatch");
+        return;
+      }
+
+      for (const entity of data.entities) {
+        scene.updateEntityGrid(entity.id, { x: entity.x, y: entity.y });
+        if (entity.doorState) {
+          scene.setEntityDoorState(entity.id, entity.doorState);
+        }
+      }
+      const camera = scene.getCamera();
+      camera.setZoom(data.camera.zoom);
+      camera.setPosition({ x: data.camera.x, y: data.camera.y });
+      renderer.debugImportRuntimeState(data.runtime);
+      setMovementStatus(data.movementStatus);
+      setCommandState(data.commandState);
+      setSaveStateStatus("loaded");
+    } catch {
+      setSaveStateStatus("load-failed");
+    }
+  };
+
+  const resetScenario = (): void => {
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current;
+    if (!scene || !renderer) {
+      setSaveStateStatus("reset-failed");
+      return;
+    }
+    const fresh = createDemoWorld();
+    scene.setWorld(fresh);
+    fitCameraToWorld(scene);
+    renderer.debugImportRuntimeState({
+      npcPatrolIndex: 0,
+      queuedTarget: null,
+      activeDestination: null,
+      playerTarget: null,
+      moving: false,
+    });
+    setMovementStatus("idle");
+    setCommandState("none");
+    setPathPreviewState("idle");
+    setDoorState("n/a");
+    setDoorMenu(null);
+    setDoorVisuals([]);
+    setSaveStateStatus("reset");
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -285,6 +490,23 @@ export function App(): JSX.Element {
           <button data-testid="overlay-toggle-los" onClick={toggleLosOverlay}>
             LOS: {losOverlayEnabled ? "on" : "off"}
           </button>
+          <button data-testid="camera-mode-toggle" onClick={toggleCameraMode}>
+            CameraMode: {cameraMode === "follow" ? "follow" : "free"}
+          </button>
+          <label htmlFor="save-slot">Slot:</label>
+          <select
+            id="save-slot"
+            data-testid="save-slot"
+            value={saveSlot}
+            onChange={(e) => setSaveSlot(Number(e.target.value) as 1 | 2 | 3)}
+          >
+            <option value={1}>1</option>
+            <option value={2}>2</option>
+            <option value={3}>3</option>
+          </select>
+          <button data-testid="save-state" onClick={saveState}>Save State</button>
+          <button data-testid="load-state" onClick={loadState}>Load State</button>
+          <button data-testid="reset-scenario" onClick={resetScenario}>Start New Scenario</button>
           <span data-testid="debug-picked-tile">HoverTile: {pickedTile}</span>
           <span data-testid="debug-picked-entity">SelectedEntity: {pickedEntity}</span>
           <span data-testid="debug-last-pick">PickEvent: {lastPickEvent}</span>
@@ -297,14 +519,61 @@ export function App(): JSX.Element {
           <span data-testid="path-preview-state">
             PathPreview: {pathPreviewState}
           </span>
+          <span data-testid="interaction-intent">Intent: {interactionIntent}</span>
           <span data-testid="debug-player-tile">PlayerTile: {playerTile}</span>
           <span data-testid="debug-door-closed-state">DoorClosed: {doorClosedState}</span>
           <span data-testid="debug-door-locked-state">DoorLocked: {doorLockedState}</span>
-          <span>Controls: WASD + Mouse Wheel + Hover/Click + RightClick(cancel) + C(center)</span>
+          <span data-testid="save-state-status">StateIO: {saveStateStatus}</span>
+          <span>Controls: WASD + MiddleDrag + EdgeScroll + MouseWheel + Hover/Click + RightClick(cancel) + C(center) + CameraMode(toggle)</span>
         </div>
       </header>
       <main className="viewport-wrap">
-        <div className="viewport" ref={hostRef} />
+        <div className="viewport" ref={hostRef}>
+          <div className="door-sprite-layer" aria-hidden="true">
+            {doorVisuals.map((door) => (
+              <div
+                key={door.id}
+                data-testid={`door-sprite-${door.id}`}
+                data-state={door.state}
+                className={`door-sprite state-${door.state} orient-${door.orientation}`}
+                style={{ left: `${door.x}px`, top: `${door.y}px` }}
+              >
+                <span className="door-frame" />
+                <span className="door-leaf" />
+                <span className="door-hinge hinge-top" />
+                <span className="door-hinge hinge-bottom" />
+                <span className="door-wheel">
+                  <span className="door-wheel-core">76</span>
+                  <span className="door-wheel-spoke spoke-1" />
+                  <span className="door-wheel-spoke spoke-2" />
+                  <span className="door-wheel-spoke spoke-3" />
+                  <span className="door-wheel-spoke spoke-4" />
+                </span>
+              </div>
+            ))}
+          </div>
+          {doorMenu ? (
+            <div
+              className="door-context-menu"
+              data-testid="door-context-menu"
+              style={{ left: `${doorMenu.position.x + 8}px`, top: `${doorMenu.position.y + 8}px` }}
+            >
+              <div className="door-context-title">Door: {doorMenu.doorState}</div>
+              <button data-testid="door-menu-open" onClick={() => runDoorAction("open")}>
+                Open
+              </button>
+              <button data-testid="door-menu-close" onClick={() => runDoorAction("close")}>
+                Close
+              </button>
+              <button data-testid="door-menu-key" onClick={() => runDoorAction("key")}>
+                Key
+              </button>
+              <button data-testid="door-menu-lockpick" onClick={() => runDoorAction("lockpick")}>
+                Lockpick
+              </button>
+            </div>
+          ) : null}
+        </div>
       </main>
     </div>
   );

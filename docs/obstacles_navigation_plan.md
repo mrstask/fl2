@@ -90,11 +90,20 @@ Implement:
 1. Explicit door interaction outcomes in HUD (`opened`, `closed`, `locked`).
 2. Prevent movement command execution when door interaction is consumed.
 3. Clear status reset behavior after movement/interaction transitions.
+4. Closed unlocked door click triggers move-to-door interaction:
+- actor paths to a valid adjacent tile first
+- door opens only when actor reaches interaction range
+5. Door interaction input model matches Fallout-style flow:
+- hover door sets hand cursor
+- click door opens action menu (`open`, `close`, `key`, `lockpick`)
+- selected action executes, including approach-first behavior when out of range
 
 Definition of done:
 1. Door clicks never silently fail.
 2. Door interaction feedback is unambiguous to player.
 3. Clicking door does not enqueue unintended move command.
+4. Closed door does not open from range; it opens only after approach completes.
+5. Door action menu remains usable when moving pointer from door to menu.
 
 ## Step 8: Obstacle E2E Coverage
 Implement:
@@ -128,3 +137,14 @@ Definition of done:
 1. Reload restores obstacle state exactly.
 2. Patrol resumes from persisted index.
 3. No invalid paths generated after load.
+
+## Step 11: Camera Mode Polish
+Implement:
+1. Follow camera mode targeting the player actor.
+2. Runtime toggle between `free` and `follow` modes from HUD/debug controls.
+3. Keep existing free-camera controls (`WASD`, edge scroll, middle-drag, wheel zoom) intact in free mode.
+
+Definition of done:
+1. In follow mode camera smoothly tracks player movement without jitter.
+2. Mode switching is visible in HUD and scriptable from debug API.
+3. Existing movement/interaction flows remain stable under both modes.

@@ -30,6 +30,7 @@
 3. Rendering Layer
 - Pixi scene graph for world tiles, actors, VFX, LOS overlays, interaction markers
 - Camera controls, map chunk loading, combat visualization
+- Camera modes: `free` and `follow` (player-tracking)
 
 4. Content Layer
 - JSON definitions for locations, quests, NPCs, items, dialogue
@@ -101,6 +102,18 @@ Combat log:
   - evaluates cover, threat, hit chance, AP efficiency
   - chooses action package (flank, focus fire, retreat, heal, suppress)
 - Behavior profiles per archetype (raider, sniper, brute, medic, robot)
+
+## 4.7 Interaction Runtime
+- Door interaction is range-gated:
+  - clicking a closed unlocked door from distance creates an approach command
+  - actor moves to an adjacent tile first
+  - door opens only after adjacency is reached
+- Locked doors reject open action and return explicit HUD/debug feedback.
+- Door UX model:
+  - hover door uses hand cursor
+  - click door opens context menu with actions (`open`, `close`, `key`, `lockpick`)
+  - selected action is executed via the interaction runtime
+- Rendering currently uses CSS door sprites for `closed/open/locked` visual states, layered above canvas map rendering.
 
 ## 5. Data Contracts (Initial)
 ## 5.1 Item Schema
